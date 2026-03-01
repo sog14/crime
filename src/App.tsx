@@ -18,7 +18,16 @@ import {
   Database,
   Lock,
   User,
-  LogOut
+  LogOut,
+  Maximize2,
+  Minimize2,
+  Layers,
+  Plus as PlusIcon,
+  Minus as MinusIcon,
+  Crosshair,
+  Sun,
+  Moon,
+  Globe
 } from 'lucide-react';
 import { 
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, 
@@ -30,6 +39,8 @@ import { MapContainer, TileLayer, Marker, Popup, CircleMarker, useMap } from 're
 import { format, parseISO, getYear, isValid, parse } from 'date-fns';
 import { motion, AnimatePresence } from 'motion/react';
 import L from 'leaflet';
+import MarkerClusterGroup from 'react-leaflet-cluster';
+import 'leaflet/dist/leaflet.css';
 
 import { FIRData, CrimeCategory, CRIME_CATEGORIES } from './types';
 import { categorizeCrime, flexibleParseDate } from './utils/crimeUtils';
@@ -41,6 +52,14 @@ const COLORS = ['#ef4444', '#f97316', '#f59e0b', '#10b981', '#3b82f6', '#6366f1'
 
 function MapController({ data }: { data: FIRData[] }) {
   const map = useMap();
+  
+  useEffect(() => {
+    (window as any).leafletMap = map;
+    return () => {
+      delete (window as any).leafletMap;
+    };
+  }, [map]);
+
   useEffect(() => {
     if (data.length > 0) {
       const validPoints = data.filter(d => d.lat && d.lng);
@@ -165,6 +184,8 @@ export default function App() {
   const [selectedCategories, setSelectedCategories] = useState<string[]>(['All']);
   const [searchQuery, setSearchQuery] = useState('');
   const [view, setView] = useState<'dashboard' | 'map' | 'report'>('dashboard');
+  const [isMapFullScreen, setIsMapFullScreen] = useState(false);
+  const [mapTheme, setMapTheme] = useState<'light' | 'dark' | 'satellite'>('light');
   const [isEntryFormOpen, setIsEntryFormOpen] = useState(false);
   const [editingRecord, setEditingRecord] = useState<FIRData | null>(null);
   const [isLoading, setIsLoading] = useState(false);
@@ -1336,40 +1357,171 @@ export default function App() {
                 </div>
               </div>
             ) : (
-              <div className="h-[70vh] bg-white rounded-3xl border border-zinc-200 shadow-xl overflow-hidden relative">
-                <MapContainer center={[28.6139, 77.2090]} zoom={11} scrollWheelZoom={true} style={{ height: '100%', width: '100%' }}>
+              <div className={cn(
+                "bg-white rounded-3xl border border-zinc-200 shadow-xl overflow-hidden relative transition-all duration-500",
+                isMapFullScreen ? "fixed inset-0 z-[100] rounded-none border-none" : "h-[70vh]"
+              )}>
+                <MapContainer 
+                  center={[28.6139, 77.2090]} 
+                  zoom={11} 
+                  scrollWheelZoom={true} 
+                  style={{ height: '100%', width: '100%' }}
+                  zoomControl={false}
+                >
                   <TileLayer
-                    attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
-                    url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
+                    attribution={
+                      mapTheme === 'satellite' 
+                        ? 'Tiles &copy; Esri &mdash; Source: Esri, i-cubed, USDA, USGS, AEX, GeoEye, Getmapping, Aerogrid, IGN, IGP, UPR-EBP, and the GIS User Community'
+                        : '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors &copy; <a href="https://carto.com/attributions">CARTO</a>'
+                    }
+                    url={
+                      mapTheme === 'dark' 
+                        ? "https://{s}.basemaps.cartocdn.com/rastertiles/dark_all/{z}/{x}/{y}{r}.png"
+                        : mapTheme === 'satellite'
+                        ? "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"
+                        : "https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png"
+                    }
                   />
                   <MapController data={filteredData} />
-                  {filteredData.map((item, idx) => (
-                    <CircleMarker 
-                      key={idx} 
-                      center={[item.lat || 0, item.lng || 0]} 
-                      radius={8}
-                      pathOptions={{ 
-                        fillColor: 
-                          item.category === 'Murder' || item.category === 'Culpable Homicide' ? '#ef4444' : 
-                          item.category === 'Dacoity' || item.category === 'Robbery' ? '#f97316' : 
-                          '#3b82f6', 
-                        color: 'white', 
-                        weight: 2, 
-                        fillOpacity: 0.8 
-                      }}
-                    >
-                      <Popup>
-                        <div className="p-1">
-                          <h3 className="font-bold text-zinc-900">FIR: {item.firNo}</h3>
-                          <p className="text-xs text-zinc-500 mt-1"><b>Category:</b> {item.category}</p>
-                          <p className="text-xs text-zinc-500"><b>Station:</b> {item.policeStation}</p>
-                          <p className="text-xs text-zinc-500"><b>Sections:</b> {item.sections}</p>
-                          <p className="text-xs text-zinc-500"><b>Date:</b> {item.firDate}</p>
-                        </div>
-                      </Popup>
-                    </CircleMarker>
-                  ))}
+                  
+                  <MarkerClusterGroup
+                    chunkedLoading
+                    maxClusterRadius={50}
+                    showCoverageOnHover={false}
+                    spiderfyOnMaxZoom={true}
+                  >
+                    {filteredData.map((item, idx) => (
+                      <CircleMarker 
+                        key={idx} 
+                        center={[item.lat || 0, item.lng || 0]} 
+                        radius={isMapFullScreen ? 10 : 8}
+                        pathOptions={{ 
+                          fillColor: 
+                            item.category === 'Murder' || item.category === 'Culpable Homicide' ? '#ef4444' : 
+                            item.category === 'Dacoity' || item.category === 'Robbery' ? '#f97316' : 
+                            '#3b82f6', 
+                          color: 'white', 
+                          weight: 2, 
+                          fillOpacity: 0.8 
+                        }}
+                        eventHandlers={{
+                          mouseover: (e) => {
+                            const target = e.target;
+                            target.setStyle({ fillOpacity: 1, weight: 4 });
+                          },
+                          mouseout: (e) => {
+                            const target = e.target;
+                            target.setStyle({ fillOpacity: 0.8, weight: 2 });
+                          }
+                        }}
+                      >
+                        <Popup className="custom-popup">
+                          <div className="p-2 min-w-[200px]">
+                            <div className="flex items-center gap-2 mb-2">
+                              <div className={cn(
+                                "w-2 h-2 rounded-full",
+                                item.category === 'Murder' || item.category === 'Culpable Homicide' ? "bg-red-500" : 
+                                item.category === 'Dacoity' || item.category === 'Robbery' ? "bg-orange-500" : 
+                                "bg-blue-500"
+                              )} />
+                              <h3 className="font-black text-zinc-900 text-sm uppercase tracking-wider">{item.firNo}</h3>
+                            </div>
+                            
+                            <div className="space-y-2">
+                              <div className="flex justify-between items-start gap-4">
+                                <span className="text-[10px] font-bold text-zinc-400 uppercase">Category</span>
+                                <span className="text-[10px] font-bold text-zinc-900 text-right">{item.category}</span>
+                              </div>
+                              <div className="flex justify-between items-start gap-4">
+                                <span className="text-[10px] font-bold text-zinc-400 uppercase">Station</span>
+                                <span className="text-[10px] font-bold text-zinc-900 text-right">{item.policeStation}</span>
+                              </div>
+                              <div className="flex justify-between items-start gap-4">
+                                <span className="text-[10px] font-bold text-zinc-400 uppercase">Date</span>
+                                <span className="text-[10px] font-bold text-zinc-900 text-right">{format(new Date(item.firDate), 'dd MMM yyyy')}</span>
+                              </div>
+                              <div className="pt-2 border-t border-zinc-100">
+                                <p className="text-[10px] text-zinc-500 leading-relaxed italic line-clamp-3">
+                                  {item.sections}
+                                </p>
+                              </div>
+                            </div>
+                          </div>
+                        </Popup>
+                      </CircleMarker>
+                    ))}
+                  </MarkerClusterGroup>
                 </MapContainer>
+
+                {/* Map Controls Overlay */}
+                <div className="absolute top-6 right-6 z-[1000] flex flex-col gap-3">
+                  {/* Fullscreen Toggle */}
+                  <button 
+                    onClick={() => setIsMapFullScreen(!isMapFullScreen)}
+                    className="p-3 bg-white/90 backdrop-blur-md text-zinc-900 rounded-2xl shadow-xl border border-zinc-200 hover:bg-white transition-all group"
+                    title={isMapFullScreen ? "Exit Fullscreen" : "Enter Fullscreen"}
+                  >
+                    {isMapFullScreen ? <Minimize2 size={20} /> : <Maximize2 size={20} />}
+                  </button>
+
+                  {/* Zoom Controls */}
+                  <div className="flex flex-col bg-white/90 backdrop-blur-md rounded-2xl shadow-xl border border-zinc-200 overflow-hidden">
+                    <button 
+                      onClick={() => {
+                        const map = (window as any).leafletMap;
+                        if (map) map.zoomIn();
+                      }}
+                      className="p-3 text-zinc-900 hover:bg-zinc-50 transition-all border-b border-zinc-100"
+                      title="Zoom In"
+                    >
+                      <PlusIcon size={20} />
+                    </button>
+                    <button 
+                      onClick={() => {
+                        const map = (window as any).leafletMap;
+                        if (map) map.zoomOut();
+                      }}
+                      className="p-3 text-zinc-900 hover:bg-zinc-50 transition-all"
+                      title="Zoom Out"
+                    >
+                      <MinusIcon size={20} />
+                    </button>
+                  </div>
+
+                  {/* Theme Switcher */}
+                  <div className="flex flex-col bg-white/90 backdrop-blur-md rounded-2xl shadow-xl border border-zinc-200 overflow-hidden">
+                    <button 
+                      onClick={() => setMapTheme('light')}
+                      className={cn(
+                        "p-3 transition-all border-b border-zinc-100",
+                        mapTheme === 'light' ? "bg-red-50 text-red-600" : "text-zinc-900 hover:bg-zinc-50"
+                      )}
+                      title="Light Mode"
+                    >
+                      <Sun size={20} />
+                    </button>
+                    <button 
+                      onClick={() => setMapTheme('dark')}
+                      className={cn(
+                        "p-3 transition-all border-b border-zinc-100",
+                        mapTheme === 'dark' ? "bg-red-50 text-red-600" : "text-zinc-900 hover:bg-zinc-50"
+                      )}
+                      title="Dark Mode"
+                    >
+                      <Moon size={20} />
+                    </button>
+                    <button 
+                      onClick={() => setMapTheme('satellite')}
+                      className={cn(
+                        "p-3 transition-all",
+                        mapTheme === 'satellite' ? "bg-red-50 text-red-600" : "text-zinc-900 hover:bg-zinc-50"
+                      )}
+                      title="Satellite Mode"
+                    >
+                      <Globe size={20} />
+                    </button>
+                  </div>
+                </div>
 
                 {filteredData.length === 0 && (
                   <div className="absolute inset-0 flex items-center justify-center z-[1000] bg-white/50 backdrop-blur-[2px]">
@@ -1381,25 +1533,44 @@ export default function App() {
                   </div>
                 )}
                 
-                <div className="absolute bottom-6 right-6 z-[1000] bg-white/90 backdrop-blur-md p-4 rounded-2xl border border-zinc-200 shadow-xl max-w-xs">
-                  <h4 className="text-sm font-bold text-zinc-900 mb-3">Map Legend</h4>
-                  <div className="space-y-2">
-                    <div className="flex items-center gap-2">
-                      <div className="w-3 h-3 rounded-full bg-red-500"></div>
-                      <span className="text-xs text-zinc-600 font-medium">Murder / Homicide</span>
+                <div className={cn(
+                  "absolute bottom-6 right-6 z-[1000] bg-white/90 backdrop-blur-md p-6 rounded-[2rem] border border-zinc-200 shadow-2xl max-w-xs transition-all duration-500",
+                  isMapFullScreen && "bottom-10 right-10"
+                )}>
+                  <div className="flex items-center gap-3 mb-4">
+                    <div className="w-8 h-8 bg-zinc-900 rounded-xl flex items-center justify-center text-white">
+                      <Layers size={16} />
                     </div>
-                    <div className="flex items-center gap-2">
-                      <div className="w-3 h-3 rounded-full bg-orange-500"></div>
-                      <span className="text-xs text-zinc-600 font-medium">Dacoity / Robbery</span>
+                    <h4 className="text-[10px] font-black text-zinc-900 uppercase tracking-[0.2em]">Map Legend</h4>
+                  </div>
+                  <div className="space-y-3">
+                    <div className="flex items-center justify-between group cursor-default">
+                      <div className="flex items-center gap-3">
+                        <div className="w-2.5 h-2.5 rounded-full bg-red-500 shadow-lg shadow-red-500/20"></div>
+                        <span className="text-[10px] text-zinc-500 font-bold uppercase tracking-wider">Violent Crimes</span>
+                      </div>
+                      <span className="text-[10px] font-bold text-zinc-900 opacity-0 group-hover:opacity-100 transition-opacity">Murder / Homicide</span>
                     </div>
-                    <div className="flex items-center gap-2">
-                      <div className="w-3 h-3 rounded-full bg-blue-500"></div>
-                      <span className="text-xs text-zinc-600 font-medium">Other Crimes</span>
+                    <div className="flex items-center justify-between group cursor-default">
+                      <div className="flex items-center gap-3">
+                        <div className="w-2.5 h-2.5 rounded-full bg-orange-500 shadow-lg shadow-orange-500/20"></div>
+                        <span className="text-[10px] text-zinc-500 font-bold uppercase tracking-wider">Property Crimes</span>
+                      </div>
+                      <span className="text-[10px] font-bold text-zinc-900 opacity-0 group-hover:opacity-100 transition-opacity">Dacoity / Robbery</span>
+                    </div>
+                    <div className="flex items-center justify-between group cursor-default">
+                      <div className="flex items-center gap-3">
+                        <div className="w-2.5 h-2.5 rounded-full bg-blue-500 shadow-lg shadow-blue-500/20"></div>
+                        <span className="text-[10px] text-zinc-500 font-bold uppercase tracking-wider">Other Incidents</span>
+                      </div>
+                      <span className="text-[10px] font-bold text-zinc-900 opacity-0 group-hover:opacity-100 transition-opacity">Miscellaneous</span>
                     </div>
                   </div>
-                  <p className="text-[10px] text-zinc-400 mt-4 leading-relaxed">
-                    Markers represent crime occurrences based on Police Station jurisdictions. Click markers for FIR details.
-                  </p>
+                  <div className="mt-6 pt-4 border-t border-zinc-100">
+                    <p className="text-[9px] text-zinc-400 leading-relaxed font-medium">
+                      Markers represent crime occurrences based on Police Station jurisdictions. Hover over markers for quick stats, click for full FIR details.
+                    </p>
+                  </div>
                 </div>
               </div>
             )}
