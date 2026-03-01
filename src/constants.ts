@@ -2,7 +2,7 @@ export const DISTRICTS = ['Sitamarhi', 'Sheohar'] as const;
 
 export const POLICE_STATIONS: Record<string, string[]> = {
   'Sitamarhi': [
-    'Sitamarhi Nagar PS', 'Dumra PS', 'Riga PS', 'Bairgania PS', 'Majorganj PS', 
+    'Sitamarhi Nagar PS', 'Dumra PS', 'Riga PS', 'Bargainia PS', 'Majorganj PS', 
     'Suppi PS', 'Sonvarsha PS', 'Parihar Ps', 'Bela PS', 'Bathnaha PS', 
     'Sahiyara PS', 'Punaura PS', 'Mehsaul PS', 'Mahila PS', 'SC/ST PS', 
     'Sitamarhi cyber PS', 'Pupri PS', 'Sursand PS', 'Bajpatti PS', 'Naanpur PS', 
