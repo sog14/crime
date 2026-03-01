@@ -1,0 +1,5 @@
+{
+  "name": "CrimeInsight: Pattern & Hotspot Analyzer",
+  "description": "Advanced crime data analysis tool for pattern recognition, hotspot mapping, and statistical visualization based on FIR records.",
+  "requestFramePermissions": ["geolocation"]
+}
