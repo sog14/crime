@@ -35,7 +35,7 @@ type CrimeFormValues = z.infer<typeof crimeSchema>;
 
 interface CrimeEntryFormProps {
   onClose: () => void;
-  onSuccess: () => void;
+  onSuccess: (record?: any) => void;
   initialData?: any;
 }
 
@@ -114,19 +114,24 @@ export function CrimeEntryForm({ onClose, onSuccess, initialData }: CrimeEntryFo
       };
 
       if (initialData?.id) {
-        const { error } = await supabase
+        const { data, error } = await supabase
           .from('crime_records')
           .update(payload)
-          .eq('id', initialData.id);
+          .eq('id', initialData.id)
+          .select()
+          .single();
         if (error) throw error;
+        onSuccess(data);
       } else {
-        const { error } = await supabase
+        const { data, error } = await supabase
           .from('crime_records')
-          .insert([payload]);
+          .insert([payload])
+          .select()
+          .single();
         if (error) throw error;
+        onSuccess(data);
       }
       
-      onSuccess();
       onClose();
     } catch (error) {
       console.error('Error inserting crime record:', error);
