@@ -19,6 +19,9 @@ export interface FIRData {
   isNight: boolean;
   lat: number;
   lng: number;
+  // Performance optimization fields
+  _searchStr?: string;
+  _firNorm?: string;
 }
 
 export type CrimeCategory = 
