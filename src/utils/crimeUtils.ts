@@ -12,36 +12,20 @@ export function flexibleParseDate(dateStr: string): Date | null {
   if (!s) return null;
 
   // Try ISO first
-  let date = parseISO(s);
-  if (isValid(date)) return date;
+  if (s.length >= 10 && s.includes('-')) {
+    const date = parseISO(s);
+    if (isValid(date)) return date;
+  }
 
   // Try common formats
   const formats = [
     'yyyy-MM-dd HH:mm:ss',
-    'yyyy-MM-dd HH:mm:ss.SSSSSSX',
     'dd-MM-yyyy HH:mm:ss',
     'dd/MM/yyyy HH:mm:ss',
-    'dd-MM-yyyy HH:mm',
-    'dd/MM/yyyy HH:mm',
     'yyyy-MM-dd',
     'dd-MM-yyyy',
     'dd/MM/yyyy',
-    'dd.MM.yyyy',
-    'yyyy/MM/dd',
-    'yyyy.MM.dd',
-    'MM-dd-yyyy',
-    'MM/dd/yyyy',
-    'MM.dd.yyyy',
-    'dd MMM yyyy',
-    'dd MMMM yyyy',
-    'yyyy-MM-dd\'T\'HH:mm',
-    'yyyy-MM-dd\'T\'HH:mm:ss',
-    'dd-MM-yy',
-    'dd/MM/yy',
-    'dd.MM.yy',
-    'MM-dd-yy',
-    'MM/dd/yy',
-    'MM.dd.yy'
+    'dd.MM.yyyy'
   ];
 
   for (const fmt of formats) {
