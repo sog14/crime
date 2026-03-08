@@ -1,7 +1,7 @@
 import React, { useState, useMemo, useEffect } from 'react';
 import { 
   Map as MapIcon, 
-  BarChart3, 
+  BarChart3,  
   PieChart as PieChartIcon, 
   TrendingUp, 
   Shield, 
