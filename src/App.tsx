@@ -36,11 +36,13 @@ import {
   ComposedChart
 } from 'recharts';
 import { MapContainer, TileLayer, Marker, Popup, CircleMarker, useMap } from 'react-leaflet';
+import { TableVirtuoso } from 'react-virtuoso';
 import { format, parseISO, getYear, isValid, parse } from 'date-fns';
 import { motion, AnimatePresence } from 'motion/react';
 import L from 'leaflet';
 import MarkerClusterGroup from 'react-leaflet-cluster';
 import 'leaflet/dist/leaflet.css';
+import { HeatmapLayer } from './components/HeatmapLayer';
 
 import { FIRData, CrimeCategory, CRIME_CATEGORIES } from './types';
 import { categorizeCrime, flexibleParseDate } from './utils/crimeUtils';
@@ -186,6 +188,8 @@ export default function App() {
   const [view, setView] = useState<'dashboard' | 'map' | 'report'>('dashboard');
   const [isMapFullScreen, setIsMapFullScreen] = useState(false);
   const [mapTheme, setMapTheme] = useState<'light' | 'dark' | 'satellite'>('light');
+  const [mapMode, setMapMode] = useState<'markers' | 'heatmap'>('heatmap');
+  const [showAllMarkers, setShowAllMarkers] = useState(false);
   const [isEntryFormOpen, setIsEntryFormOpen] = useState(false);
   const [editingRecord, setEditingRecord] = useState<FIRData | null>(null);
   const [isLoading, setIsLoading] = useState(false);
@@ -227,6 +231,84 @@ export default function App() {
     }
   };
 
+  const processRecord = (row: any) => {
+    const firDateStr = String(row.fir_date || '');
+    const incidentDateStr = String(row.incident_date || '');
+
+    if (!firDateStr && !incidentDateStr) return null;
+    
+    const firDate = flexibleParseDate(firDateStr);
+    const incidentDate = flexibleParseDate(incidentDateStr) || firDate;
+    
+    if (!firDate && !incidentDate) return null;
+
+    const finalFirDate = firDate || incidentDate!;
+    const finalIncidentDate = incidentDate || firDate!;
+    const yearVal = getYear(finalFirDate);
+
+    let category: CrimeCategory = 'Other';
+    const rawCategory = row.crime_head || row.category || '';
+    
+    if (rawCategory) {
+      const cleaned = String(rawCategory).trim();
+      const matched = CRIME_CATEGORIES.find(c => c.toLowerCase() === cleaned.toLowerCase());
+      if (matched) {
+        category = matched;
+      } else {
+        category = categorizeCrime(cleaned || row.sections || '', yearVal);
+      }
+    } else {
+      category = categorizeCrime(row.sections || '', yearVal);
+    }
+
+    const hour = finalIncidentDate.getHours();
+    const monthVal = format(finalFirDate, 'MMM');
+    const dayOfWeekVal = format(finalFirDate, 'EEEE');
+    const firNoVal = row.fir_no || 'Unknown';
+
+    // Pre-calculate search string for O(1) search check
+    const searchStr = [
+      row.district_name,
+      row.police_station,
+      category,
+      yearVal,
+      monthVal,
+      finalFirDate.toISOString(),
+      row.sections,
+      row.accused,
+      row.complainant,
+      row.address
+    ].join(' ').toLowerCase();
+
+    const normalize = (s: string) => s.toLowerCase().replace(/\s+/g, '');
+    const firNorm = normalize(firNoVal);
+
+    return {
+      id: row.id,
+      firNo: firNoVal,
+      firDate: finalFirDate.toISOString(),
+      complainant: row.complainant || '',
+      address: row.address || '',
+      accused: row.accused || '',
+      policeStation: row.police_station || 'Unknown',
+      sections: row.sections || '',
+      district: row.district_name || 'Unknown',
+      incidentDate: finalIncidentDate.toISOString(),
+      placeOfOccurrenceGR: row.place_of_occurrence_gr || '',
+      category,
+      year: yearVal,
+      month: monthVal,
+      dayOfWeek: dayOfWeekVal,
+      hour,
+      isNight: hour >= 19 || hour < 6,
+      lat: row.latitude || 28.6139,
+      lng: row.longitude || 77.2090,
+      _timestamp: finalFirDate.getTime(),
+      _searchStr: searchStr,
+      _firNorm: firNorm
+    } as FIRData & { _timestamp: number };
+  };
+
   const fetchSupabaseData = async () => {
     setIsLoading(true);
     setError(null);
@@ -236,39 +318,35 @@ export default function App() {
         .from('crime_records')
         .select('*', { count: 'exact', head: true });
       
-      if (!countError && dbCount !== null) {
-        setTotalInDb(dbCount);
+      const totalCount = dbCount || 0;
+      setTotalInDb(totalCount);
+
+      if (totalCount === 0) {
+        setData([]);
+        return;
       }
 
-      let allRecords: any[] = [];
-      let page = 0;
       const pageSize = 1000;
-      let hasMore = true;
-
-      while (hasMore) {
-        const { data: records, error: fetchError } = await supabase
-          .from('crime_records')
-          .select('*')
-          .order('fir_date', { ascending: false })
-          .range(page * pageSize, (page + 1) * pageSize - 1);
-
-        if (fetchError) throw fetchError;
-
-        if (records && records.length > 0) {
-          allRecords = [...allRecords, ...records];
-          if (records.length < pageSize) {
-            hasMore = false;
-          } else {
-            page++;
-          }
-        } else {
-          hasMore = false;
-        }
+      const totalPages = Math.ceil(totalCount / pageSize);
+      
+      // Fetch data in parallel chunks (max 10 at a time to avoid rate limiting)
+      const concurrencyLimit = 10;
+      let allRecords: any[] = [];
+      
+      for (let i = 0; i < totalPages; i += concurrencyLimit) {
+        const chunk = Array.from({ length: Math.min(concurrencyLimit, totalPages - i) }, (_, index) => {
+          const page = i + index;
+          return supabase
+            .from('crime_records')
+            .select('*')
+            .order('fir_date', { ascending: false })
+            .range(page * pageSize, (page + 1) * pageSize - 1);
+        });
         
-        // Safety break to prevent infinite loops if something goes wrong
-        if (page > 100) { // 100,000 records limit for safety
-          console.warn("Reached safety limit of 100,000 records.");
-          hasMore = false;
+        const results = await Promise.all(chunk);
+        for (const { data: records, error: fetchError } of results) {
+          if (fetchError) throw fetchError;
+          if (records) allRecords = [...allRecords, ...records];
         }
       }
 
@@ -281,75 +359,9 @@ export default function App() {
         
         let skipped = 0;
         const processed = records.map((row: any) => {
-          // Robust checking of required fields
-          const firDateStr = String(row.fir_date || '');
-          const incidentDateStr = String(row.incident_date || '');
-
-          // If both are missing, we can't do much
-          if (!firDateStr && !incidentDateStr) {
-            console.warn("Skipping record due to missing both dates:", row);
-            skipped++;
-            return null;
-          }
-          
-          const firDate = flexibleParseDate(firDateStr);
-          const incidentDate = flexibleParseDate(incidentDateStr) || firDate; // Fallback to firDate if incident_date is missing
-          
-          // If we still don't have a valid date, skip
-          if (!firDate && !incidentDate) {
-            console.warn("Skipping record due to unparseable dates:", row, { firDateStr, incidentDateStr });
-            skipped++;
-            return null;
-          }
-
-          const finalFirDate = firDate || incidentDate!;
-          const finalIncidentDate = incidentDate || firDate!;
-          const year = getYear(finalFirDate);
-
-          // Prefer existing crime_head or category column if it exists
-          let category: CrimeCategory = 'Other';
-          const rawCategory = row.crime_head || row.category || '';
-          
-          if (rawCategory) {
-            // Clean up the raw category string
-            const cleaned = String(rawCategory).trim();
-            // Check if it matches our known categories
-            const matched = CRIME_CATEGORIES.find(c => c.toLowerCase() === cleaned.toLowerCase());
-            if (matched) {
-              category = matched;
-            } else {
-              // Fallback to categorization logic if it's not a direct match
-              category = categorizeCrime(cleaned || row.sections || '', year);
-            }
-          } else {
-            category = categorizeCrime(row.sections || '', year);
-          }
-
-          const hour = finalIncidentDate.getHours();
-          const isNight = hour >= 19 || hour < 6;
-
-          return {
-            id: row.id,
-            firNo: row.fir_no || 'Unknown',
-            firDate: finalFirDate.toISOString(),
-            complainant: row.complainant || '',
-            address: row.address || '',
-            accused: row.accused || '',
-            policeStation: row.police_station || 'Unknown',
-            sections: row.sections || '',
-            district: row.district_name || 'Unknown',
-            incidentDate: finalIncidentDate.toISOString(),
-            placeOfOccurrenceGR: row.place_of_occurrence_gr || '',
-            category,
-            year: getYear(finalFirDate),
-            month: format(finalFirDate, 'MMM'),
-            dayOfWeek: format(finalFirDate, 'EEEE'),
-            hour,
-            isNight,
-            lat: row.latitude || 28.6139,
-            lng: row.longitude || 77.2090,
-            _timestamp: finalFirDate.getTime()
-          } as FIRData & { _timestamp: number };
+          const p = processRecord(row);
+          if (!p) skipped++;
+          return p;
         }).filter(Boolean) as (FIRData & { _timestamp: number })[];
         
         // Sort client-side because text-based columns in Supabase sort alphabetically
@@ -375,47 +387,47 @@ export default function App() {
   }, []);
 
   const filteredData = useMemo(() => {
+    const searchLower = searchQuery.toLowerCase().trim();
+    if (!searchLower && selectedYears.includes('All') && selectedMonths.includes('All') && selectedDistricts.includes('All') && selectedPoliceStations.includes('All') && selectedCategories.includes('All')) {
+      return data;
+    }
+
+    const normalize = (s: string) => s.toLowerCase().replace(/\s+/g, '');
+    const normalizeFIR = (s: string) => {
+      return s.toLowerCase()
+        .replace(/\s+/g, '')
+        .replace('/20', '/')
+        .split('/')
+        .map(p => p.replace(/^0+/, '') || '0')
+        .join('/');
+    };
+
+    const sNorm = searchLower ? normalize(searchLower) : '';
+    const sFirNorm = searchLower ? normalizeFIR(searchLower) : '';
+
     return data.filter(item => {
       const yearMatch = selectedYears.includes('All') || selectedYears.includes(item.year.toString());
+      if (!yearMatch) return false;
+      
       const monthMatch = selectedMonths.includes('All') || selectedMonths.includes(item.month);
+      if (!monthMatch) return false;
+      
       const districtMatch = selectedDistricts.includes('All') || selectedDistricts.includes(item.district);
+      if (!districtMatch) return false;
+      
       const psMatch = selectedPoliceStations.includes('All') || selectedPoliceStations.includes(item.policeStation);
+      if (!psMatch) return false;
+      
       const categoryMatch = selectedCategories.includes('All') || selectedCategories.includes(item.category);
+      if (!categoryMatch) return false;
       
-      const searchLower = searchQuery.toLowerCase().trim();
-      if (!searchLower) return yearMatch && monthMatch && districtMatch && psMatch && categoryMatch;
+      if (!searchLower) return true;
 
-      // Normalize for flexible matching (remove spaces, handle 25 vs 2025, leading zeros)
-      const normalize = (s: string) => s.toLowerCase().replace(/\s+/g, '');
-      const normalizeFIR = (s: string) => {
-        return s.toLowerCase()
-          .replace(/\s+/g, '')
-          .replace('/20', '/')
-          .split('/')
-          .map(p => p.replace(/^0+/, '') || '0')
-          .join('/');
-      };
-
-      const sNorm = normalize(searchLower);
-      const sFirNorm = normalizeFIR(searchLower);
-      const firNorm = normalize(item.firNo);
-      const firNoNorm = normalizeFIR(item.firNo);
-      
-      const searchMatch = 
-        item.district.toLowerCase().includes(searchLower) ||
-        item.policeStation.toLowerCase().includes(searchLower) ||
-        item.category.toLowerCase().includes(searchLower) ||
-        item.year.toString().includes(searchLower) ||
-        item.month.toLowerCase().includes(searchLower) ||
-        item.firDate.includes(searchLower) ||
-        firNorm.includes(sNorm) ||
-        firNoNorm.includes(sFirNorm) ||
-        item.sections.toLowerCase().includes(searchLower) ||
-        item.accused.toLowerCase().includes(searchLower) ||
-        item.complainant.toLowerCase().includes(searchLower) ||
-        item.address.toLowerCase().includes(searchLower);
-
-      return yearMatch && monthMatch && districtMatch && psMatch && categoryMatch && searchMatch;
+      return (
+        item._searchStr?.includes(searchLower) ||
+        item._firNorm?.includes(sNorm) ||
+        (item.firNo && normalizeFIR(item.firNo).includes(sFirNorm))
+      );
     });
   }, [data, selectedYears, selectedMonths, selectedDistricts, selectedPoliceStations, selectedCategories, searchQuery]);
 
@@ -453,112 +465,155 @@ export default function App() {
 
   const allMonths = ['All', 'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
-  // Chart Data Generators
-  const categoryDistribution = useMemo(() => {
-    const counts: Record<string, number> = {};
-    filteredData.forEach(d => {
-      counts[d.category] = (counts[d.category] || 0) + 1;
-    });
-    return Object.entries(counts).map(([name, value]) => ({ name, value }));
+  const heatmapPoints = useMemo(() => {
+    return filteredData
+      .filter(d => d.lat && d.lng)
+      .map(d => [d.lat, d.lng, 1] as [number, number, number]);
   }, [filteredData]);
 
-  const districtWise = useMemo(() => {
-    const counts: Record<string, number> = {};
+  // Optimized Single-Pass Aggregation
+  const stats = useMemo(() => {
+    const categoryCounts: Record<string, number> = {};
+    const districtCounts: Record<string, number> = {};
+    const stationCounts: Record<string, number> = {};
+    const dayCounts: Record<string, number> = {};
+    
+    const yearCatMap: Record<string, Record<string, number>> = {};
+    const monthCatMap: Record<string, Record<string, number>> = {};
+    const stationCatMap: Record<string, Record<string, number>> = {};
+    const districtCatMap: Record<string, Record<string, number>> = {};
+
     filteredData.forEach(d => {
-      counts[d.district] = (counts[d.district] || 0) + 1;
+      categoryCounts[d.category] = (categoryCounts[d.category] || 0) + 1;
+      districtCounts[d.district] = (districtCounts[d.district] || 0) + 1;
+      stationCounts[d.policeStation] = (stationCounts[d.policeStation] || 0) + 1;
+      dayCounts[d.dayOfWeek] = (dayCounts[d.dayOfWeek] || 0) + 1;
+
+      const y = d.year.toString();
+      if (!yearCatMap[y]) yearCatMap[y] = {};
+      yearCatMap[y][d.category] = (yearCatMap[y][d.category] || 0) + 1;
+
+      const m = d.month;
+      if (!monthCatMap[m]) monthCatMap[m] = {};
+      monthCatMap[m][d.category] = (monthCatMap[m][d.category] || 0) + 1;
+
+      const ps = d.policeStation;
+      if (!stationCatMap[ps]) stationCatMap[ps] = {};
+      stationCatMap[ps][d.category] = (stationCatMap[ps][d.category] || 0) + 1;
+
+      const dist = d.district;
+      if (!districtCatMap[dist]) districtCatMap[dist] = {};
+      districtCatMap[dist][d.category] = (districtCatMap[dist][d.category] || 0) + 1;
     });
-    return Object.entries(counts).map(([name, value]) => ({ name, value })).sort((a, b) => b.value - a.value);
+
+    return {
+      categoryCounts,
+      districtCounts,
+      stationCounts,
+      dayCounts,
+      yearCatMap,
+      monthCatMap,
+      stationCatMap,
+      districtCatMap
+    };
   }, [filteredData]);
 
-  const stationWise = useMemo(() => {
-    const counts: Record<string, number> = {};
-    filteredData.forEach(d => {
-      counts[d.policeStation] = (counts[d.policeStation] || 0) + 1;
-    });
-    return Object.entries(counts).map(([name, value]) => ({ name, value })).sort((a, b) => b.value - a.value).slice(0, 10);
-  }, [filteredData]);
+  const categoryDistribution = useMemo(() => 
+    Object.entries(stats.categoryCounts).map(([name, value]) => ({ name, value }))
+  , [stats.categoryCounts]);
+
+  const districtWise = useMemo(() => 
+    Object.entries(stats.districtCounts).map(([name, value]) => ({ name, value })).sort((a, b) => (b.value as number) - (a.value as number))
+  , [stats.districtCounts]);
+
+  const stationWise = useMemo(() => 
+    Object.entries(stats.stationCounts).map(([name, value]) => ({ name, value })).sort((a, b) => (b.value as number) - (a.value as number)).slice(0, 10)
+  , [stats.stationCounts]);
 
   const radarData = useMemo(() => {
     const categories = selectedCategories.includes('All') ? CRIME_CATEGORIES : selectedCategories;
     return categories.map(cat => ({
       subject: cat,
-      A: filteredData.filter(d => d.category === cat).length,
+      A: stats.categoryCounts[cat] || 0,
       fullMark: Math.max(...categoryDistribution.map(d => d.value), 10)
     }));
-  }, [filteredData, categoryDistribution, selectedCategories]);
+  }, [stats.categoryCounts, categoryDistribution, selectedCategories]);
 
   const stationCategoryData = useMemo(() => {
-    const stations = Array.from(new Set(filteredData.map(d => d.policeStation))).slice(0, 10);
+    const stations = Object.entries(stats.stationCounts)
+      .sort((a: [string, number], b: [string, number]) => b[1] - a[1])
+      .slice(0, 10)
+      .map(e => e[0]);
+
     return stations.map(ps => {
       const entry: any = { name: ps };
       const activeCategories = selectedCategories.includes('All') ? CRIME_CATEGORIES : selectedCategories;
       activeCategories.forEach(cat => {
-        entry[cat] = filteredData.filter(d => d.policeStation === ps && d.category === cat).length;
+        entry[cat] = stats.stationCatMap[ps]?.[cat] || 0;
       });
       return entry;
     });
-  }, [filteredData, selectedCategories]);
+  }, [stats.stationCounts, stats.stationCatMap, selectedCategories]);
 
   const districtCategoryData = useMemo(() => {
-    const districts = Array.from(new Set(filteredData.map(d => d.district))).slice(0, 5);
+    const districts = Object.entries(stats.districtCounts)
+      .sort((a: [string, number], b: [string, number]) => b[1] - a[1])
+      .slice(0, 5)
+      .map(e => e[0]);
+
     return districts.map(dist => {
       const entry: any = { name: dist };
       const activeCategories = selectedCategories.includes('All') ? CRIME_CATEGORIES : selectedCategories;
       activeCategories.forEach(cat => {
-        entry[cat] = filteredData.filter(d => d.district === dist && d.category === cat).length;
+        entry[cat] = stats.districtCatMap[dist]?.[cat] || 0;
       });
       return entry;
     });
-  }, [filteredData, selectedCategories]);
+  }, [stats.districtCounts, stats.districtCatMap, selectedCategories]);
 
-  // 1. Year-wise and overall crime head wise no of incidents (Reactive to filters)
   const yearCategoryDistribution = useMemo(() => {
-    const years = Array.from(new Set(filteredData.map(d => Number(d.year)))).sort((a: number, b: number) => a - b);
+    const years = Object.keys(stats.yearCatMap).sort((a, b) => Number(a) - Number(b));
     return years.map(y => {
-      const entry: any = { name: y.toString() };
+      const entry: any = { name: y };
       const activeCategories = selectedCategories.includes('All') ? CRIME_CATEGORIES : selectedCategories;
       activeCategories.forEach(cat => {
-        entry[cat] = filteredData.filter(d => d.year === y && d.category === cat).length;
+        entry[cat] = stats.yearCatMap[y]?.[cat] || 0;
       });
       return entry;
     });
-  }, [filteredData, selectedCategories]);
+  }, [stats.yearCatMap, selectedCategories]);
 
-  // 2. Month-wise crime pattern (Reactive to filters)
   const monthlyCrimePattern = useMemo(() => {
     const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
     return months.map(m => {
       const entry: any = { name: m };
       const activeCategories = selectedCategories.includes('All') ? CRIME_CATEGORIES : selectedCategories;
       activeCategories.forEach(cat => {
-        entry[cat] = filteredData.filter(d => d.month === m && d.category === cat).length;
+        entry[cat] = stats.monthCatMap[m]?.[cat] || 0;
       });
       return entry;
     });
-  }, [filteredData, selectedCategories]);
+  }, [stats.monthCatMap, selectedCategories]);
 
-  // 4. Yearly trend for each crime head (Line Chart)
   const yearlyTrendPerCategory = useMemo(() => {
     const years = Array.from(new Set(data.map(d => Number(d.year)))).sort((a: number, b: number) => a - b);
     return years.map(y => {
       const entry: any = { name: y.toString() };
       const categoriesToProcess = selectedCategories.includes('All') ? CRIME_CATEGORIES : selectedCategories;
       categoriesToProcess.forEach(cat => {
-        // We filter from filteredData to respect other filters (district, PS, etc)
-        entry[cat] = filteredData.filter(d => d.year === y && d.category === cat).length;
+        entry[cat] = stats.yearCatMap[y.toString()]?.[cat] || 0;
       });
       return entry;
     });
-  }, [data, filteredData, selectedCategories]);
+  }, [data, stats.yearCatMap, selectedCategories]);
 
-  // 6. Major Crime Days of Week
   const dayOfWeekHeatmap = useMemo(() => {
     const days = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
     return days.map(d => ({
       name: d,
-      count: filteredData.filter(item => item.dayOfWeek === d).length
+      count: stats.dayCounts[d] || 0
     }));
-  }, [filteredData]);
+  }, [stats.dayCounts]);
 
   const handleLogout = async () => {
     await supabase.auth.signOut();
@@ -1252,108 +1307,110 @@ export default function App() {
                     </button>
                   </div>
                 </div>
-                <div className="overflow-x-auto">
-                  <table className="w-full text-left border-collapse">
-                    <thead>
+                <div className="h-[calc(100vh-300px)]">
+                  <TableVirtuoso
+                    data={filteredData}
+                    className="w-full"
+                    fixedHeaderContent={() => (
                       <tr className="bg-zinc-50 border-b border-zinc-100">
-                        <th className="px-6 py-4 text-[10px] font-bold text-zinc-400 uppercase tracking-widest">FIR Details</th>
-                        <th className="px-6 py-4 text-[10px] font-bold text-zinc-400 uppercase tracking-widest">Incident Info</th>
-                        <th className="px-6 py-4 text-[10px] font-bold text-zinc-400 uppercase tracking-widest">Location</th>
-                        <th className="px-6 py-4 text-[10px] font-bold text-zinc-400 uppercase tracking-widest">Category & Sections</th>
-                        <th className="px-6 py-4 text-[10px] font-bold text-zinc-400 uppercase tracking-widest">Parties</th>
-                        <th className="px-6 py-4 text-[10px] font-bold text-zinc-400 uppercase tracking-widest">Actions</th>
+                        <th className="px-6 py-4 text-[10px] font-bold text-zinc-400 uppercase tracking-widest text-left bg-zinc-50">FIR Details</th>
+                        <th className="px-6 py-4 text-[10px] font-bold text-zinc-400 uppercase tracking-widest text-left bg-zinc-50">Incident Info</th>
+                        <th className="px-6 py-4 text-[10px] font-bold text-zinc-400 uppercase tracking-widest text-left bg-zinc-50">Location</th>
+                        <th className="px-6 py-4 text-[10px] font-bold text-zinc-400 uppercase tracking-widest text-left bg-zinc-50">Category & Sections</th>
+                        <th className="px-6 py-4 text-[10px] font-bold text-zinc-400 uppercase tracking-widest text-left bg-zinc-50">Parties</th>
+                        <th className="px-6 py-4 text-[10px] font-bold text-zinc-400 uppercase tracking-widest text-left bg-zinc-50">Actions</th>
                       </tr>
-                    </thead>
-                    <tbody className="divide-y divide-zinc-50">
-                      {filteredData.length > 0 ? (
-                        filteredData.map((item) => (
-                          <tr key={item.id} className="hover:bg-zinc-50/50 transition-colors group">
-                            <td className="px-6 py-4">
-                              <div className="font-bold text-zinc-900 text-sm">{item.firNo}</div>
-                              <div className="text-[10px] text-zinc-400 mt-1 flex items-center gap-1">
-                                <Calendar size={10} /> {flexibleParseDate(item.firDate) ? format(flexibleParseDate(item.firDate)!, 'dd MMM yyyy') : item.firDate}
-                              </div>
-                            </td>
-                            <td className="px-6 py-4">
-                              <div className="text-xs font-medium text-zinc-700">
-                                {flexibleParseDate(item.incidentDate) ? format(flexibleParseDate(item.incidentDate)!, 'dd MMM yyyy') : item.incidentDate}
-                              </div>
-                              <div className="text-[10px] text-zinc-400 mt-1">
-                                {flexibleParseDate(item.incidentDate) ? format(flexibleParseDate(item.incidentDate)!, 'hh:mm a') : ''}
-                              </div>
-                            </td>
-                            <td className="px-6 py-4">
-                              <div className="text-xs font-bold text-zinc-900">{item.policeStation}</div>
-                              <div className="text-[10px] text-zinc-500 mt-0.5">{item.district}</div>
-                              <div className="text-[10px] text-zinc-400 mt-1 italic line-clamp-1">{item.address}</div>
-                            </td>
-                            <td className="px-6 py-4">
-                              <span className={cn(
-                                "px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-tighter",
-                                item.category === 'Murder' ? "bg-red-100 text-red-600" :
-                                item.category === 'Culpable Homicide' ? "bg-rose-100 text-rose-600" :
-                                item.category === 'Dacoity' ? "bg-orange-100 text-orange-600" :
-                                item.category === 'Robbery' ? "bg-amber-100 text-amber-600" :
-                                item.category === 'Extortion' ? "bg-yellow-100 text-yellow-600" :
-                                item.category === 'Ransom' ? "bg-purple-100 text-purple-600" :
-                                item.category === 'Theft' ? "bg-blue-100 text-blue-600" :
-                                "bg-zinc-100 text-zinc-600"
-                              )}>
-                                {item.category}
-                              </span>
-                              <div className="text-[10px] text-zinc-500 mt-2 font-mono line-clamp-2 max-w-[200px]">
-                                {item.sections}
-                              </div>
-                            </td>
-                            <td className="px-6 py-4">
-                              <div className="space-y-1">
-                                <div className="text-[10px] flex items-center gap-1.5">
-                                  <span className="font-bold text-zinc-400 uppercase w-12">Accused:</span>
-                                  <span className="text-zinc-700 font-medium line-clamp-1">{item.accused || 'N/A'}</span>
-                                </div>
-                                <div className="text-[10px] flex items-center gap-1.5">
-                                  <span className="font-bold text-zinc-400 uppercase w-12">Compl:</span>
-                                  <span className="text-zinc-700 font-medium line-clamp-1">{item.complainant || 'N/A'}</span>
-                                </div>
-                              </div>
-                            </td>
-                            <td className="px-6 py-4">
-                              <button 
-                                onClick={() => {
-                                  setEditingRecord(item);
-                                  setIsEntryFormOpen(true);
-                                }}
-                                className="p-2 hover:bg-zinc-100 rounded-lg text-zinc-400 hover:text-zinc-900 transition-all"
-                                title="Edit Record"
-                              >
-                                <RefreshCw size={14} />
-                              </button>
-                            </td>
-                          </tr>
-                        ))
-                      ) : (
-                        <tr>
-                          <td colSpan={6} className="px-6 py-12 text-center space-y-4">
-                            <div className="text-zinc-400 italic text-sm">No records found matching your filters.</div>
-                            {(searchQuery || !selectedYears.includes('All') || !selectedMonths.includes('All') || !selectedPoliceStations.includes('All') || !selectedCategories.includes('All')) && (
-                              <button 
-                                onClick={() => {
-                                  setSelectedYears(['All']);
-                                  setSelectedMonths(['All']);
-                                  setSelectedPoliceStations(['All']);
-                                  setSelectedCategories(['All']);
-                                  setSearchQuery('');
-                                }}
-                                className="text-xs font-bold text-red-600 hover:text-red-700 transition-colors"
-                              >
-                                Clear all filters and search
-                              </button>
-                            )}
-                          </td>
-                        </tr>
+                    )}
+                    itemContent={(_index, item) => (
+                      <>
+                        <td className="px-6 py-4 border-b border-zinc-50">
+                          <div className="font-bold text-zinc-900 text-sm">{item.firNo}</div>
+                          <div className="text-[10px] text-zinc-400 mt-1 flex items-center gap-1">
+                            <Calendar size={10} /> {flexibleParseDate(item.firDate) ? format(flexibleParseDate(item.firDate)!, 'dd MMM yyyy') : item.firDate}
+                          </div>
+                        </td>
+                        <td className="px-6 py-4 border-b border-zinc-50">
+                          <div className="text-xs font-medium text-zinc-700">
+                            {flexibleParseDate(item.incidentDate) ? format(flexibleParseDate(item.incidentDate)!, 'dd MMM yyyy') : item.incidentDate}
+                          </div>
+                          <div className="text-[10px] text-zinc-400 mt-1">
+                            {flexibleParseDate(item.incidentDate) ? format(flexibleParseDate(item.incidentDate)!, 'hh:mm a') : ''}
+                          </div>
+                        </td>
+                        <td className="px-6 py-4 border-b border-zinc-50">
+                          <div className="text-xs font-bold text-zinc-900">{item.policeStation}</div>
+                          <div className="text-[10px] text-zinc-500 mt-0.5">{item.district}</div>
+                          <div className="text-[10px] text-zinc-400 mt-1 italic line-clamp-1">{item.address}</div>
+                        </td>
+                        <td className="px-6 py-4 border-b border-zinc-50">
+                          <span className={cn(
+                            "px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-tighter",
+                            item.category === 'Murder' ? "bg-red-100 text-red-600" :
+                            item.category === 'Culpable Homicide' ? "bg-rose-100 text-rose-600" :
+                            item.category === 'Dacoity' ? "bg-orange-100 text-orange-600" :
+                            item.category === 'Robbery' ? "bg-amber-100 text-amber-600" :
+                            item.category === 'Extortion' ? "bg-yellow-100 text-yellow-600" :
+                            item.category === 'Ransom' ? "bg-purple-100 text-purple-600" :
+                            item.category === 'Theft' ? "bg-blue-100 text-blue-600" :
+                            "bg-zinc-100 text-zinc-600"
+                          )}>
+                            {item.category}
+                          </span>
+                          <div className="text-[10px] text-zinc-500 mt-2 font-mono line-clamp-2 max-w-[200px]">
+                            {item.sections}
+                          </div>
+                        </td>
+                        <td className="px-6 py-4 border-b border-zinc-50">
+                          <div className="space-y-1">
+                            <div className="text-[10px] flex items-center gap-1.5">
+                              <span className="font-bold text-zinc-400 uppercase w-12">Accused:</span>
+                              <span className="text-zinc-700 font-medium line-clamp-1">{item.accused || 'N/A'}</span>
+                            </div>
+                            <div className="text-[10px] flex items-center gap-1.5">
+                              <span className="font-bold text-zinc-400 uppercase w-12">Compl:</span>
+                              <span className="text-zinc-700 font-medium line-clamp-1">{item.complainant || 'N/A'}</span>
+                            </div>
+                          </div>
+                        </td>
+                        <td className="px-6 py-4 border-b border-zinc-50">
+                          <button 
+                            onClick={() => {
+                              setEditingRecord(item);
+                              setIsEntryFormOpen(true);
+                            }}
+                            className="p-2 hover:bg-zinc-100 rounded-lg text-zinc-400 hover:text-zinc-900 transition-all"
+                            title="Edit Record"
+                          >
+                            <RefreshCw size={14} />
+                          </button>
+                        </td>
+                      </>
+                    )}
+                    components={{
+                      Table: (props) => <table {...props} className="w-full text-left border-collapse" />,
+                      TableBody: React.forwardRef((props, ref) => <tbody {...props} ref={ref} className="divide-y divide-zinc-50" />),
+                      TableRow: (props) => <tr {...props} className="hover:bg-zinc-50/50 transition-colors group" />
+                    }}
+                  />
+                  {filteredData.length === 0 && (
+                    <div className="px-6 py-12 text-center space-y-4">
+                      <div className="text-zinc-400 italic text-sm">No records found matching your filters.</div>
+                      {(searchQuery || !selectedYears.includes('All') || !selectedMonths.includes('All') || !selectedPoliceStations.includes('All') || !selectedCategories.includes('All')) && (
+                        <button 
+                          onClick={() => {
+                            setSelectedYears(['All']);
+                            setSelectedMonths(['All']);
+                            setSelectedPoliceStations(['All']);
+                            setSelectedCategories(['All']);
+                            setSearchQuery('');
+                          }}
+                          className="text-xs font-bold text-red-600 hover:text-red-700 transition-colors"
+                        >
+                          Clear all filters and search
+                        </button>
                       )}
-                    </tbody>
-                  </table>
+                    </div>
+                  )}
                 </div>
               </div>
             ) : (
@@ -1384,73 +1441,77 @@ export default function App() {
                   />
                   <MapController data={filteredData} />
                   
-                  <MarkerClusterGroup
-                    chunkedLoading
-                    maxClusterRadius={50}
-                    showCoverageOnHover={false}
-                    spiderfyOnMaxZoom={true}
-                  >
-                    {filteredData.map((item, idx) => (
-                      <CircleMarker 
-                        key={idx} 
-                        center={[item.lat || 0, item.lng || 0]} 
-                        radius={isMapFullScreen ? 10 : 8}
-                        pathOptions={{ 
-                          fillColor: 
-                            item.category === 'Murder' || item.category === 'Culpable Homicide' ? '#ef4444' : 
-                            item.category === 'Dacoity' || item.category === 'Robbery' ? '#f97316' : 
-                            '#3b82f6', 
-                          color: 'white', 
-                          weight: 2, 
-                          fillOpacity: 0.8 
-                        }}
-                        eventHandlers={{
-                          mouseover: (e) => {
-                            const target = e.target;
-                            target.setStyle({ fillOpacity: 1, weight: 4 });
-                          },
-                          mouseout: (e) => {
-                            const target = e.target;
-                            target.setStyle({ fillOpacity: 0.8, weight: 2 });
-                          }
-                        }}
-                      >
-                        <Popup className="custom-popup">
-                          <div className="p-2 min-w-[200px]">
-                            <div className="flex items-center gap-2 mb-2">
-                              <div className={cn(
-                                "w-2 h-2 rounded-full",
-                                item.category === 'Murder' || item.category === 'Culpable Homicide' ? "bg-red-500" : 
-                                item.category === 'Dacoity' || item.category === 'Robbery' ? "bg-orange-500" : 
-                                "bg-blue-500"
-                              )} />
-                              <h3 className="font-black text-zinc-900 text-sm uppercase tracking-wider">{item.firNo}</h3>
+                  {mapMode === 'heatmap' ? (
+                    <HeatmapLayer points={heatmapPoints} />
+                  ) : (
+                    <MarkerClusterGroup
+                      chunkedLoading
+                      maxClusterRadius={50}
+                      showCoverageOnHover={false}
+                      spiderfyOnMaxZoom={true}
+                    >
+                      {(showAllMarkers ? filteredData : filteredData.slice(0, 2000)).map((item, idx) => (
+                        <CircleMarker 
+                          key={idx} 
+                          center={[item.lat || 0, item.lng || 0]} 
+                          radius={isMapFullScreen ? 10 : 8}
+                          pathOptions={{ 
+                            fillColor: 
+                              item.category === 'Murder' || item.category === 'Culpable Homicide' ? '#ef4444' : 
+                              item.category === 'Dacoity' || item.category === 'Robbery' ? '#f97316' : 
+                              '#3b82f6', 
+                            color: 'white', 
+                            weight: 2, 
+                            fillOpacity: 0.8 
+                          }}
+                          eventHandlers={{
+                            mouseover: (e) => {
+                              const target = e.target;
+                              target.setStyle({ fillOpacity: 1, weight: 4 });
+                            },
+                            mouseout: (e) => {
+                              const target = e.target;
+                              target.setStyle({ fillOpacity: 0.8, weight: 2 });
+                            }
+                          }}
+                        >
+                          <Popup className="custom-popup">
+                            <div className="p-2 min-w-[200px]">
+                              <div className="flex items-center gap-2 mb-2">
+                                <div className={cn(
+                                  "w-2 h-2 rounded-full",
+                                  item.category === 'Murder' || item.category === 'Culpable Homicide' ? "bg-red-500" : 
+                                  item.category === 'Dacoity' || item.category === 'Robbery' ? "bg-orange-500" : 
+                                  "bg-blue-500"
+                                )} />
+                                <h3 className="font-black text-zinc-900 text-sm uppercase tracking-wider">{item.firNo}</h3>
+                              </div>
+                              
+                              <div className="space-y-2">
+                                <div className="flex justify-between items-start gap-4">
+                                  <span className="text-[10px] font-bold text-zinc-400 uppercase">Category</span>
+                                  <span className="text-[10px] font-bold text-zinc-900 text-right">{item.category}</span>
+                                </div>
+                                <div className="flex justify-between items-start gap-4">
+                                  <span className="text-[10px] font-bold text-zinc-400 uppercase">Station</span>
+                                  <span className="text-[10px] font-bold text-zinc-900 text-right">{item.policeStation}</span>
+                                </div>
+                                <div className="flex justify-between items-start gap-4">
+                                  <span className="text-[10px] font-bold text-zinc-400 uppercase">Date</span>
+                                  <span className="text-[10px] font-bold text-zinc-900 text-right">{format(new Date(item.firDate), 'dd MMM yyyy')}</span>
+                                </div>
+                                <div className="pt-2 border-t border-zinc-100">
+                                  <p className="text-[10px] text-zinc-500 leading-relaxed italic line-clamp-3">
+                                    {item.sections}
+                                  </p>
+                                </div>
+                              </div>
                             </div>
-                            
-                            <div className="space-y-2">
-                              <div className="flex justify-between items-start gap-4">
-                                <span className="text-[10px] font-bold text-zinc-400 uppercase">Category</span>
-                                <span className="text-[10px] font-bold text-zinc-900 text-right">{item.category}</span>
-                              </div>
-                              <div className="flex justify-between items-start gap-4">
-                                <span className="text-[10px] font-bold text-zinc-400 uppercase">Station</span>
-                                <span className="text-[10px] font-bold text-zinc-900 text-right">{item.policeStation}</span>
-                              </div>
-                              <div className="flex justify-between items-start gap-4">
-                                <span className="text-[10px] font-bold text-zinc-400 uppercase">Date</span>
-                                <span className="text-[10px] font-bold text-zinc-900 text-right">{format(new Date(item.firDate), 'dd MMM yyyy')}</span>
-                              </div>
-                              <div className="pt-2 border-t border-zinc-100">
-                                <p className="text-[10px] text-zinc-500 leading-relaxed italic line-clamp-3">
-                                  {item.sections}
-                                </p>
-                              </div>
-                            </div>
-                          </div>
-                        </Popup>
-                      </CircleMarker>
-                    ))}
-                  </MarkerClusterGroup>
+                          </Popup>
+                        </CircleMarker>
+                      ))}
+                    </MarkerClusterGroup>
+                  )}
                 </MapContainer>
 
                 {/* Map Controls Overlay */}
@@ -1490,6 +1551,28 @@ export default function App() {
 
                   {/* Theme Switcher */}
                   <div className="flex flex-col bg-white/90 backdrop-blur-md rounded-2xl shadow-xl border border-zinc-200 overflow-hidden">
+                    <button 
+                      onClick={() => setMapMode(mapMode === 'markers' ? 'heatmap' : 'markers')}
+                      className={cn(
+                        "p-3 transition-all border-b border-zinc-100",
+                        mapMode === 'heatmap' ? "bg-red-50 text-red-600" : "text-zinc-900 hover:bg-zinc-50"
+                      )}
+                      title={mapMode === 'heatmap' ? "Switch to Markers" : "Switch to Heatmap"}
+                    >
+                      <TrendingUp size={20} />
+                    </button>
+                    {mapMode === 'markers' && (
+                      <button 
+                        onClick={() => setShowAllMarkers(!showAllMarkers)}
+                        className={cn(
+                          "p-3 transition-all border-b border-zinc-100",
+                          showAllMarkers ? "bg-red-50 text-red-600" : "text-zinc-900 hover:bg-zinc-50"
+                        )}
+                        title={showAllMarkers ? "Limit to 2000 Markers" : "Show All Markers"}
+                      >
+                        <Layers size={20} />
+                      </button>
+                    )}
                     <button 
                       onClick={() => setMapTheme('light')}
                       className={cn(
@@ -1595,7 +1678,20 @@ export default function App() {
               setIsEntryFormOpen(false);
               setEditingRecord(null);
             }} 
-            onSuccess={fetchSupabaseData}
+            onSuccess={(newRecord) => {
+              if (newRecord) {
+                const processed = processRecord(newRecord);
+                if (processed) {
+                  setData(prev => {
+                    const filtered = prev.filter(r => r.id !== processed.id);
+                    const next = [processed, ...filtered].sort((a, b) => b._timestamp - a._timestamp);
+                    return next;
+                  });
+                }
+              } else {
+                fetchSupabaseData();
+              }
+            }} 
             initialData={editingRecord}
           />
         )}
