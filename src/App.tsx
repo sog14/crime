@@ -1720,7 +1720,7 @@ function ChartCard({ title, icon, children }: { title: string, icon: React.React
         </button>
       </div>
       <div className="w-full">
-        {children}
+        {children} 
       </div>
     </motion.div>
   );
